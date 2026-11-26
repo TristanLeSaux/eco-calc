@@ -56,7 +56,7 @@ class Views {
 
   tooltip(o) {
     if (o.raw) return o.name;
-    return `${(this.D.tables[o.recipe.table] || {}).name || ''} · ${fmt(o.labor)} cal · ` + o.ings.map(g => `${fmt(g.qty)}× ${g.name}`).join(', ');
+    return `${(this.D.tables[o.recipe.table] || {}).name || ''} · ${fmt(o.labor)} cal · ` + (o.qty > 1 ? `${fmt(o.qty)} par craft · ` : '') + o.ings.map(g => `${fmt(g.qty)}× ${g.name}`).join(', ');
   }
 
   upgradeTitle(u) {
@@ -95,9 +95,15 @@ class Views {
     const current = (this.S.talents[skillId] || {})[level] || '';
     const options = groups.map(([k, g]) => {
       const value = g.talents.map(t => this.I.costTalents.has(t) && this.D.talents[t].value).find(Boolean);
-      return `<option value="${k}"${k === current ? ' selected' : ''} title="${esc(g.desc || '')}">${esc(g.name)}${value ? ` (ressources ×${value})` : ''}</option>`;
+      const max = this.C.maxStars(this.D, k);
+      const note = value ? ` (ressources ×${value})` : max > 1 ? ` (jusqu'à ${max} étoiles)` : '';
+      return `<option value="${k}"${k === current ? ' selected' : ''} title="${esc(g.desc || '')}">${esc(g.name)}${note}</option>`;
     }).join('');
-    return `<span>Talent niv. ${level}</span><select data-act="talent" data-id="${skillId}" data-lv="${level}"><option value="">Aucun</option>${options}</select>`;
+    const max = current ? this.C.maxStars(this.D, current) : 1;
+    const stars = max > 1
+      ? `<span>Étoiles</span><input type="number" min="1" max="${max}" value="${Math.min(max, (this.S.stars || {})[current] || 1)}" data-act="stars" data-g="${current}">`
+      : '';
+    return `<span>Talent niv. ${level}</span><select data-act="talent" data-id="${skillId}" data-lv="${level}"><option value="">Aucun</option>${options}</select>${stars}`;
   }
 
   tableBlock(t) {

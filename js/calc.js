@@ -2,12 +2,27 @@
    labeur    = base x modificateur du niveau de skill x (1 + somme % labeur des upgrades)
    ressource = base x multiplicateur global x (1 + somme % ressources des upgrades) x talent (ex. Lavish 0,95)
    coût      = (somme ingredients x prix + labeur x prix/1000) / quantité produite
+   rendement = quantité de base + bonus additif des talents (réduit le coût par unité)
+   talents à étoiles : chaque étoile ajoute (valeur - 1) au multiplicateur du bonus, dans la limite du plafond (ex. Fine Carpentry : 0,88 par étoile, plafond 0,4 : 5 étoiles = -60 %).
    Les upgrades de spécialité ne s'appliquent qu'aux recettes de leur skill. Un ingrédient « fixe » n'est pas réduit. */
 (function (root) {
   'use strict';
 
   const MAX_LEVEL = 7;
   const TALENT_LEVELS = [3, 6];
+
+  /* Étoiles maximum d'un groupe de talents (1 pour un talent sans bonus cumulable). */
+  const maxStars = (D, groupId) => {
+    const g = D.talentGroups[groupId];
+    return g ? Math.max(1, ...g.talents.map(t => (D.talents[t] || {}).stars || 1)) : 1;
+  };
+
+  /* Multiplicateur d'un bonus de talent pour n étoiles. */
+  const bonusFactor = (b, stars) => {
+    if (b.type !== 'capped') return b.v;
+    const m = 1 + (b.v - 1) * stars;
+    return b.v < 1 ? Math.max(b.cap, m) : Math.min(b.cap, m);
+  };
 
   const norm = s => (s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
   const byName = (a, b) => a.name.localeCompare(b.name);
@@ -88,6 +103,47 @@
       return set;
     }
 
+    /* Bonus de coût des talents choisis (compétence assez haute) : [{ b: bonus, group, stars }]. */
+    activeBonuses() {
+      if (this._bonuses) return this._bonuses;
+      const out = [];
+      for (const sk of Object.keys(this.S.talents)) {
+        for (const L of TALENT_LEVELS) {
+          const id = (this.S.talents[sk] || {})[L], g = this.D.talentGroups[id];
+          if (!g || g.skill !== sk || this.level(sk) < L) continue;
+          const stars = Math.min(maxStars(this.D, id), Math.max(1, Math.round((this.S.stars || {})[id]) || 1));
+          for (const t of g.talents) for (const b of (this.D.talents[t] || {}).bonuses || []) out.push({ b, group: g, stars });
+        }
+      }
+      return this._bonuses = out;
+    }
+
+    /* Un bonus vise une recette selon sa compétence (ou celle du groupe), ses recettes, les tags de l'objet produit et sa table. */
+    bonusApplies({ b, group }, r) {
+      if (b.recipes && b.recipes.length) { if (!b.recipes.includes(String(r.id).split('#')[0])) return false; }
+      else if (!(b.skills && b.skills.length ? b.skills : [group.skill]).includes(r.skill)) return false;
+      if (b.stations && b.stations.length && !b.stations.includes(r.table)) return false;
+      if (b.tags && b.tags.length) {
+        const tags = (this.D.items[r.outputs[0].item] || {}).tags || [];
+        if (!b.tags.some(t => tags.includes(t))) return false;
+      }
+      return true;
+    }
+
+    /* Multiplicateur des talents pour une action ('ResourceCost' ou 'LaborCost') sur une recette. */
+    talentFactor(r, action) {
+      let f = 1;
+      for (const x of this.activeBonuses()) if (x.b.a === action && this.bonusApplies(x, r)) f *= bonusFactor(x.b, x.stars);
+      return f;
+    }
+
+    /* Unités supplémentaires produites par craft grâce aux talents de rendement (bonus additifs). */
+    yieldBonus(r) {
+      let n = 0;
+      for (const x of this.activeBonuses()) if (x.b.a === 'Yield' && this.bonusApplies(x, r)) n += x.b.v * (x.b.type === 'add' ? 1 : x.stars);
+      return n;
+    }
+
     activeUps(r) {
       const t = this.D.tables[r.table], checked = this.S.ups[r.table] || {}, out = [];
       if (!t) return out;
@@ -103,19 +159,21 @@
     labor(r) {
       const sk = r.skill && this.D.skills[r.skill];
       const mod = sk ? (sk.levels[this.level(r.skill)] ?? 1) : 1;
-      return r.labor * mod * Math.max(0, 1 + this.activeUps(r).reduce((a, u) => a + u.labor, 0));
+      return r.labor * mod * Math.max(0, 1 + this.activeUps(r).reduce((a, u) => a + u.labor, 0)) * this.talentFactor(r, 'LaborCost');
     }
 
     quantity(r, ing) {
       let q = ing.qty * (this.S.resMod || 1);
       if (ing.fixed) return q;
-      q *= Math.max(0, 1 + this.activeUps(r).reduce((a, u) => a + u.resource, 0));
+      q *= Math.max(0, 1 + this.activeUps(r).reduce((a, u) => a + u.resource, 0)) * this.talentFactor(r, 'ResourceCost');
       if (ing.talent && r.skill && this.talentSet(r.skill).has(ing.talent)) {
         const v = this.D.talents[ing.talent] && this.D.talents[ing.talent].value;
         if (v) q *= v;
       }
       return q;
     }
+
+    outputQty(r) { return r.outputs[0].qty + this.yieldBonus(r); }
 
     price(key) { return parseFloat(this.S.prices[key]) || 0; }
 
@@ -138,7 +196,7 @@
       let x = 0;
       for (const ing of r.ingredients) x += this.quantity(r, ing) * this.unitPrice(ing, seen);
       x += this.labor(r) * (this.S.ppk || 0) / 1000;
-      x /= r.outputs[0].qty;
+      x /= this.outputQty(r);
       this.memo.set(item, x);
       return x;
     }
@@ -154,7 +212,7 @@
         }
         const c = this.cost(item, new Set()), profit = o.profit == null || o.profit === '' ? (S.profit || 0) : o.profit;
         outputs.push({ item, name: r.outputs[0].name, recipe: r, alts: I.byItem.get(item) || [r], cost: c, profit, sell: c * (1 + profit / 100),
-          labor: this.labor(r), ings: r.ingredients.map(g => ({ name: g.name, qty: this.quantity(r, g) })) });
+          labor: this.labor(r), qty: this.outputQty(r), ings: r.ingredients.map(g => ({ name: g.name, qty: this.quantity(r, g) })) });
         if (r.skill && D.skills[r.skill]) skills.add(r.skill);
         if (r.table) tables.add(r.table);
         for (const g of r.ingredients) {
@@ -171,10 +229,10 @@
     }
   }
 
-  const newState = () => ({ ppk: 1, profit: 0, resMod: 1, outputs: [], levels: {}, talents: {}, ups: {}, prices: {} });
+  const newState = () => ({ ppk: 1, profit: 0, resMod: 1, outputs: [], levels: {}, talents: {}, stars: {}, ups: {}, prices: {} });
 
   const api = {
-    norm, newState, MAX_LEVEL, TALENT_LEVELS,
+    norm, newState, maxStars, MAX_LEVEL, TALENT_LEVELS,
     index: D => new RecipeIndex(D),
     compute: (D, I, S) => new Pricing(D, I, S).run(),
   };

@@ -70,7 +70,13 @@ class App {
         return store.commit('full');
       case 'talent':
         (S.talents[d.id] = S.talents[d.id] || {})[d.lv] = t.value;
-        return store.commit('values');
+        return store.commit('full');
+      case 'stars': {
+        const max = this.C.maxStars(this.views.D, d.g);
+        S.stars = S.stars || {};
+        S.stars[d.g] = Math.min(max, Math.max(1, Math.round(num(t.value)) || 1));
+        return store.commit('full');
+      }
       case 'up':
         (S.ups[d.t] = S.ups[d.t] || {})[d.u] = t.checked;
         return store.commit('values');
